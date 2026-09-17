@@ -18,10 +18,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          # Do not enable npm cache: repository has no package-lock.json.
 
-      # The repository currently contains the app source inside quickserve.zip.
-      # Restore it automatically before running npm build.
       - name: Restore app source from ZIP
         shell: bash
         run: |
@@ -30,23 +27,18 @@ jobs:
             rm -rf /tmp/quickserve-source
             mkdir -p /tmp/quickserve-source
             unzip -q quickserve.zip -d /tmp/quickserve-source
-
             SOURCE_DIR="$(find /tmp/quickserve-source -type f -name package.json -print -quit | xargs -r dirname)"
             if [ -z "$SOURCE_DIR" ]; then
               echo "ERROR: package.json was not found inside quickserve.zip"
               exit 1
             fi
-
-            echo "Source directory: $SOURCE_DIR"
             cp -a "$SOURCE_DIR"/. .
           fi
 
           if [ ! -f "src/main.tsx" ]; then
             echo "ERROR: src/main.tsx is still missing after ZIP restore."
-            echo "The ZIP does not contain the expected React source structure."
             exit 1
           fi
-
           echo "React source check: OK"
           ls -la src | head -30
 
@@ -68,7 +60,18 @@ jobs:
       - name: Sync Android
         run: npx cap sync android
 
-      # Capacitor's current Android build requires Java 21.
+      - name: Fix Kotlin duplicate stdlib dependencies
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/build.gradle")
+          text = p.read_text()
+          fix = '''\n\n// Keep Kotlin stdlib dependencies compatible with the generated Capacitor project.\nsubprojects {\n    configurations.configureEach {\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'\n    }\n}\n'''
+          if "kotlin-stdlib-jdk7" not in text or "exclude group: 'org.jetbrains.kotlin'" not in text:
+              p.write_text(text + fix)
+          PY
+
       - name: Setup Java
         uses: actions/setup-java@v5
         with:
@@ -80,6 +83,12 @@ jobs:
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
+
+      - name: Verify APK exists
+        shell: bash
+        run: |
+          test -f android/app/build/outputs/apk/debug/app-debug.apk
+          ls -lh android/app/build/outputs/apk/debug/app-debug.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
