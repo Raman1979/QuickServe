@@ -48,6 +48,39 @@ jobs:
       - name: Build React app
         run: npm run build
 
+      - name: Remove desktop/device preview wrapper from mobile build
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          patched = 0
+          pattern = re.compile(
+              r'J3=\(\{children:r\}\)=>\{const\{isDeviceFrame:e,setIsDeviceFrame:t\}=es\(\),.*?\},K3=\(\)=>',
+              re.S,
+          )
+          replacement = 'J3=({children:r})=>f.jsx("div",{className:"min-h-screen w-full bg-white text-neutral-900 overflow-hidden",children:r}),K3=()=>'
+
+          for p in Path("dist").rglob("*.js"):
+              text = p.read_text(errors="ignore")
+              new_text, count = pattern.subn(replacement, text, count=1)
+              if count:
+                  p.write_text(new_text)
+                  patched += count
+                  print(f"Patched mobile wrapper: {p}")
+
+          if patched != 1:
+              raise SystemExit(f"ERROR: expected to patch exactly 1 mobile wrapper, patched {patched}")
+
+          for p in Path("dist").rglob("*.js"):
+              text = p.read_text(errors="ignore")
+              if 'children:"5G"' in text or 'children:"88%"' in text or 'toggle-view-mode-btn' in text:
+                  raise SystemExit(f"ERROR: fake device UI still present in {p}")
+
+          print("Mobile UI patch: OK")
+          PY
+
       - name: Install Capacitor
         run: npm install @capacitor/core @capacitor/cli @capacitor/android --no-audit --no-fund
 
