@@ -11,57 +11,75 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 1. Get QuickServe source code
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2. Install Node.js
-      # npm cache is disabled because this repository does not have package-lock.json
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           package-manager-cache: false
 
-      # 3. Install project dependencies
-      - name: Install dependencies
-        run: npm install
+      # The repository currently contains the app source inside quickserve.zip.
+      # Restore it automatically before running npm build.
+      - name: Restore app source from ZIP
+        shell: bash
+        run: |
+          if [ ! -f "src/main.tsx" ]; then
+            echo "src/main.tsx not found. Restoring source from quickserve.zip..."
+            rm -rf /tmp/quickserve-source
+            mkdir -p /tmp/quickserve-source
+            unzip -q quickserve.zip -d /tmp/quickserve-source
 
-      # 4. Build React/Vite web application
+            SOURCE_DIR="$(find /tmp/quickserve-source -type f -name package.json -print -quit | xargs -r dirname)"
+            if [ -z "$SOURCE_DIR" ]; then
+              echo "ERROR: package.json was not found inside quickserve.zip"
+              exit 1
+            fi
+
+            echo "Source directory: $SOURCE_DIR"
+            cp -a "$SOURCE_DIR"/. .
+          fi
+
+          if [ ! -f "src/main.tsx" ]; then
+            echo "ERROR: src/main.tsx is still missing after ZIP restore."
+            echo "The ZIP does not contain the expected React source structure."
+            exit 1
+          fi
+
+          echo "React source check: OK"
+          ls -la src | head -30
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
       - name: Build React app
         run: npm run build
 
-      # 5. Install Capacitor
       - name: Install Capacitor
-        run: npm install @capacitor/core @capacitor/cli @capacitor/android
+        run: npm install @capacitor/core @capacitor/cli @capacitor/android --no-audit --no-fund
 
-      # 6. Create Capacitor configuration
       - name: Initialize Capacitor
         run: npx cap init QuickServe com.quickserve.app --web-dir dist
 
-      # 7. Create Android project
       - name: Add Android
         run: npx cap add android
 
-      # 8. Copy web app into Android project
       - name: Sync Android
         run: npx cap sync android
 
-      # 9. Install Java required by Android/Gradle
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
 
-      # 10. Build Debug APK
-      - name: Build APK
+      - name: Build Debug APK
         working-directory: android
         run: |
           chmod +x gradlew
           ./gradlew assembleDebug
 
-      # 11. Upload APK to GitHub Actions
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
