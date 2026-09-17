@@ -60,92 +60,147 @@ jobs:
           PY
           echo "Native Geolocation bridge: OK"
 
-      - name: Build React app
-        run: npm run build
-
-      - name: Replace location handler with native GPS
+      - name: Patch GPS handler at source level
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          replacement = '''N=()=>{(async()=>{try{const G=window.__QuickServeNativeGeolocation;if(!G){l("Native GPS is not available in this APK");return}l("Requesting GPS location permission...");const P=await G.requestPermissions();if(P.location==="denied"){l("Location permission denied. Android Settings > Apps > QuickServe > Permissions > Location > Allow");return}l("Getting your current GPS location...");const O=await G.getCurrentPosition({enableHighAccuracy:true,timeout:15000});const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);const W=await U.json();const A=W.city||W.locality||W.principalSubdivision||"Current Location";const V=W.locality||W.city||"GPS Location";s({city:A,area:V});e(!1);l(`GPS Location locked: ${V}, ${A}`)}catch(X){console.error("QuickServe native GPS error",X);const C=X&&X.code;if(C==="OS-PLUG-GLOC-0003")l("Location permission denied. Please allow location permission in Android Settings.");else if(C==="OS-PLUG-GLOC-0002")l("GPS location is unavailable. Please turn on Location/GPS.");else if(C==="OS-PLUG-GLOC-0004")l("GPS request timed out. Please try again outdoors or near a window.");else l("Could not get GPS location. Please turn ON Location and try again.")}})()}'''
+          p = Path("src/App.tsx")
+          if not p.exists():
+              raise SystemExit("ERROR: src/App.tsx not found")
+          text = p.read_text()
 
-          patched = 0
-          for p in Path("dist").rglob("*.js"):
-              text = p.read_text(errors="ignore")
-              marker = 'GPS Location locked: Indiranagar, Bengaluru'
-              pos = text.find(marker)
-              if pos < 0:
-                  continue
+          marker = "GPS Location locked: Indiranagar, Bengaluru"
+          pos = text.find(marker)
+          if pos < 0:
+              raise SystemExit("ERROR: source GPS marker not found in src/App.tsx")
 
-              # Find the arrow-function start immediately before the marker.
-              start = text.rfind('N=()=>{', 0, pos)
-              if start < 0:
-                  # Fallback: locate any one-letter minified arrow function before the marker.
-                  m = list(re.finditer(r'[A-Za-z_$][\w$]*=\(\)=>\{', text[:pos]))
-                  if not m:
-                      continue
-                  start = m[-1].start()
+          # Find the arrow-function declaration containing the old hard-coded GPS handler.
+          matches = list(re.finditer(r"(?:const|let)\\s+([A-Za-z_$][\\w$]*)\\s*=\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>\\s*\\{", text[:pos]))
+          if not matches:
+              raise SystemExit("ERROR: could not find source location handler declaration")
+          m = matches[-1]
+          fn = m.group(1)
+          start = m.start()
+          brace = text.find("{", m.start(), m.end() + 1)
 
-              # Count braces to locate the end of that function.
-              i = text.find('{', start)
-              depth = 0
-              end = None
-              in_str = None
-              esc = False
-              for j in range(i, len(text)):
-                  c = text[j]
-                  if in_str:
-                      if esc:
-                          esc = False
-                      elif c == '\\\\':
-                          esc = True
-                      elif c == in_str:
-                          in_str = None
-                      continue
-                  if c in "\\\"'`":
-                      in_str = c
-                  elif c == '{':
+          # Brace-match the complete arrow function while respecting strings/comments.
+          depth = 0
+          end = None
+          i = brace
+          quote = None
+          esc = False
+          line_comment = False
+          block_comment = False
+          while i < len(text):
+              c = text[i]
+              n = text[i + 1] if i + 1 < len(text) else ""
+              if line_comment:
+                  if c == "\\n": line_comment = False
+              elif block_comment:
+                  if c == "*" and n == "/":
+                      block_comment = False
+                      i += 1
+              elif quote:
+                  if esc:
+                      esc = False
+                  elif c == "\\":
+                      esc = True
+                  elif c == quote:
+                      quote = None
+              else:
+                  if c == "/" and n == "/":
+                      line_comment = True
+                      i += 1
+                  elif c == "/" and n == "*":
+                      block_comment = True
+                      i += 1
+                  elif c in "'\"`":
+                      quote = c
+                  elif c == "{":
                       depth += 1
-                  elif c == '}':
+                  elif c == "}":
                       depth -= 1
                       if depth == 0:
-                          end = j + 1
+                          end = i + 1
                           break
-              if end is None:
-                  raise SystemExit(f"ERROR: could not find end of location handler in {p}")
+              i += 1
 
-              old = text[start:end]
-              # Preserve the actual minified function variable name and setter names
-              # if Vite changed them, while using the known current QuickServe structure.
-              head = re.match(r'([A-Za-z_$][\\w$]*)=\\(\\)=>\\{', old)
-              if not head:
-                  continue
-              fn = head.group(1)
-              # Existing handler in this app uses s/e/l for state/message setters.
-              new = replacement.replace('N=()=>{', f'{fn}=()=>{{')
-              text = text[:start] + new + text[end:]
-              p.write_text(text)
-              patched += 1
-              print(f"Patched native GPS handler: {p}")
-              break
+          if end is None:
+              raise SystemExit("ERROR: could not find end of source location handler")
 
-          if patched != 1:
-              raise SystemExit(f"ERROR: expected exactly 1 location handler, found {patched}")
+          old = text[start:end]
 
-          found = False
-          for p in Path("dist").rglob("*.js"):
-              text = p.read_text(errors="ignore")
-              if "__QuickServeNativeGeolocation" in text and "requestPermissions" in text and "getCurrentPosition" in text:
-                  found = True
-                  print(f"Verified native GPS code in {p}")
-                  break
-          if not found:
-              raise SystemExit("ERROR: native GPS code was not bundled")
-          print("Native GPS location patch: OK")
+          # Detect the existing React setter names instead of assuming minified names.
+          lm = re.search(r"(set[A-Za-z0-9_$]*)\\(\\{\\s*city\\s*:\\s*['\"]Bengaluru['\"]\\s*,\\s*area\\s*:\\s*['\"]Indiranagar['\"]\\s*\\}\\)", old)
+          mm = re.search(r"(set[A-Za-z0-9_$]*)\\(\\s*false\\s*\\)", old)
+          sm = re.search(r"(set[A-Za-z0-9_$]*)\\(\\s*['\"]GPS Location locked", old)
+          if not (lm and mm and sm):
+              print("Old handler found, but setter names were not all detected. Handler source:")
+              print(old)
+              raise SystemExit("ERROR: could not detect location/modal/message React setters")
+
+          set_location = lm.group(1)
+          set_modal = mm.group(1)
+          set_message = sm.group(1)
+
+          replacement = f'''const {fn} = async () => {{
+            try {{
+              const G = (window as any).__QuickServeNativeGeolocation;
+              if (!G) {{
+                {set_message}("Native GPS is not available in this APK");
+                return;
+              }}
+
+              {set_message}("Requesting GPS location permission...");
+              const P = await G.requestPermissions();
+              if (P.location === "denied") {{
+                {set_message}("Location permission denied. Please allow Location permission in Android Settings.");
+                return;
+              }}
+
+              {set_message}("Getting your current GPS location...");
+              const O = await G.getCurrentPosition({{ enableHighAccuracy: true, timeout: 15000 }});
+
+              let city = "Current Location";
+              let area = "GPS Location";
+              try {{
+                const U = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${{O.coords.latitude}}&longitude=${{O.coords.longitude}}&localityLanguage=en`);
+                const W = await U.json();
+                city = W.city || W.locality || W.principalSubdivision || city;
+                area = W.locality || W.city || area;
+              }} catch (geocodeError) {{
+                console.warn("QuickServe reverse geocoding failed", geocodeError);
+              }}
+
+              {set_location}({{ city, area }});
+              {set_modal}(false);
+              {set_message}(`GPS Location locked: ${{area}}, ${{city}}`);
+            }} catch (X) {{
+              console.error("QuickServe native GPS error", X);
+              const C = X && X.code;
+              if (C === "OS-PLUG-GLOC-0003") {{
+                {set_message}("Location permission denied. Please allow Location permission in Android Settings.");
+              }} else if (C === "OS-PLUG-GLOC-0002") {{
+                {set_message}("GPS location is unavailable. Please turn ON Location/GPS.");
+              }} else if (C === "OS-PLUG-GLOC-0004") {{
+                {set_message}("GPS request timed out. Please try again outdoors or near a window.");
+              }} else {{
+                {set_message}("Could not get GPS location. Please turn ON Location and try again.");
+              }}
+            }}
+          }}'''
+
+          p.write_text(text[:start] + replacement + text[end:])
+          print(f"Source GPS handler patched: {fn}")
+          print(f"Location setter: {set_location}; modal setter: {set_modal}; message setter: {set_message}")
           PY
+          echo "Source-level GPS patch: OK"
+
+      - name: Build React app
+        run: npm run build
 
       - name: Remove desktop/device preview wrapper from mobile build
         shell: bash
@@ -154,7 +209,7 @@ jobs:
           from pathlib import Path
           import re
           patched = 0
-          pattern = re.compile(r'J3=\(\{children:r\}\)=>\{const\{isDeviceFrame:e,setIsDeviceFrame:t\}=es\(\),.*?\},K3=\(\)=>', re.S)
+          pattern = re.compile(r'J3=\\(\\{children:r\\}\\)=>\\{const\\{isDeviceFrame:e,setIsDeviceFrame:t\\}=es\\(\\),.*?\\},K3=\\(\\)=>', re.S)
           replacement = 'J3=({children:r})=>f.jsx("div",{className:"min-h-screen w-full bg-white text-neutral-900 overflow-hidden",children:r}),K3=()=>'
           for p in Path("dist").rglob("*.js"):
               text = p.read_text(errors="ignore")
