@@ -1,0 +1,6 @@
+{
+  "name": "QuickServe",
+  "description": "On-demand home services booking app for Android with service catalog, live booking tracker, and QuickServe Plus.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

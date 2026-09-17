@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "Service": {
+      "title": "Service",
+      "description": "Represents an on-demand home service in the QuickServe catalog",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "subCategoryId": { "type": "string" },
+        "name": { "type": "string" },
+        "tagline": { "type": "string" },
+        "rating": { "type": "number" },
+        "reviewCount": { "type": "number" },
+        "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
+        "durationMinutes": { "type": "number" },
+        "image": { "type": "string" },
+        "description": { "type": "string" },
+        "inclusions": { "type": "array" },
+        "exclusions": { "type": "array" },
+        "features": { "type": "array" },
+        "badge": { "type": "string" },
+        "isPopular": { "type": "boolean" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "categoryId", "subCategoryId", "name", "price", "durationMinutes"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "User account and profile data",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "phone": { "type": "string" },
+        "isUCPlusMember": { "type": "boolean" },
+        "plusExpiryDate": { "type": "string" },
+        "walletBalance": { "type": "number" },
+        "savedAddresses": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["uid", "name", "phone"]
+    },
+    "Booking": {
+      "title": "Booking",
+      "description": "Service appointment booking record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "items": { "type": "array" },
+        "totalAmount": { "type": "number" },
+        "date": { "type": "string" },
+        "timeSlot": { "type": "string" },
+        "address": { "type": "object" },
+        "status": { "type": "string" },
+        "partner": { "type": "object" },
+        "otp": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "userId", "items", "totalAmount", "status"]
+    }
+  },
+  "firestore": {
+    "/services/{serviceId}": {
+      "schema": "Service",
+      "description": "Collection of all available services in QuickServe"
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile records and membership status"
+    },
+    "/bookings/{bookingId}": {
+      "schema": "Booking",
+      "description": "Customer service bookings and progress status"
+    }
+  }
+}
