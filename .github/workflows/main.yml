@@ -48,6 +48,55 @@ jobs:
       - name: Build React app
         run: npm run build
 
+      - name: Fix real GPS location in mobile build
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          target = re.compile(
+              r'N=\(\)=>\{s\(\{city:"Bengaluru",area:"Indiranagar"\}\),e\(!1\),l\("GPS Location locked: Indiranagar, Bengaluru"\)\}'
+          )
+
+          replacement = '''N=()=>{\
+          if(!navigator.geolocation){l("Location is not supported on this device");return}\
+          l("Getting your current GPS location...");\
+          navigator.geolocation.getCurrentPosition(async O=>{\
+          try{\
+          const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);\
+          const W=await U.json();\
+          const A=W.city||W.locality||W.principalSubdivision||"Current Location";\
+          const V=W.locality||W.city||"GPS Location";\
+          s({city:A,area:V});\
+          e(!1);\
+          l(`GPS Location locked: ${V}, ${A}`);\
+          }catch{\
+          s({city:"Current Location",area:"GPS Location"});\
+          e(!1);\
+          l("GPS location found, but address lookup failed");\
+          }\
+          },O=>{\
+          if(O.code===1)l("Location permission denied. Please allow location permission in Android settings.");\
+          else if(O.code===2)l("GPS location unavailable. Please turn on Location/GPS.");\
+          else if(O.code===3)l("GPS request timed out. Please try again.");\
+          else l("Unable to get your current location. Please try again.");\
+          },{enableHighAccuracy:true,timeout:15000,maximumAge:30000})}'''
+
+          patched = 0
+          for p in Path("dist").rglob("*.js"):
+              text = p.read_text(errors="ignore")
+              new_text, count = target.subn(replacement, text, count=1)
+              if count:
+                  p.write_text(new_text)
+                  patched += count
+                  print(f"Patched GPS location: {p}")
+
+          if patched != 1:
+              raise SystemExit(f"ERROR: expected exactly 1 GPS handler to patch, found {patched}")
+          print("Real GPS location patch: OK")
+          PY
+
       - name: Remove desktop/device preview wrapper from mobile build
         shell: bash
         run: |
@@ -92,6 +141,24 @@ jobs:
 
       - name: Sync Android
         run: npx cap sync android
+
+      - name: Add Android location permissions
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("android/app/src/main/AndroidManifest.xml")
+          text = p.read_text()
+          permissions = '''    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'''
+          if "android.permission.ACCESS_FINE_LOCATION" not in text:
+              text = text.replace("<manifest ", "<manifest ", 1)
+              pos = text.find(">", text.find("<manifest")) + 1
+              text = text[:pos] + "\n" + permissions + text[pos:]
+              p.write_text(text)
+          PY
+          grep -q 'android.permission.ACCESS_FINE_LOCATION' android/app/src/main/AndroidManifest.xml
+          grep -q 'android.permission.ACCESS_COARSE_LOCATION' android/app/src/main/AndroidManifest.xml
+          echo "Android location permissions: OK"
 
       - name: Fix Kotlin duplicate stdlib dependencies
         shell: bash
