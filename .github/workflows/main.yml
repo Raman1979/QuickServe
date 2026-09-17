@@ -34,13 +34,8 @@ jobs:
             fi
             cp -a "$SOURCE_DIR"/. .
           fi
-
-          if [ ! -f "src/main.tsx" ]; then
-            echo "ERROR: src/main.tsx is still missing after ZIP restore."
-            exit 1
-          fi
+          test -f src/main.tsx
           echo "React source check: OK"
-          ls -la src | head -30
 
       - name: Install dependencies
         run: npm install --no-audit --no-fund
@@ -53,12 +48,8 @@ jobs:
         run: |
           cat > src/quickserve-native-location.ts <<'EOF'
           import { Geolocation } from '@capacitor/geolocation';
-
-          // Expose the native Capacitor Geolocation plugin to the existing QuickServe UI.
-          // The APK uses Android's real location permission/GPS APIs.
           (window as any).__QuickServeNativeGeolocation = Geolocation;
           EOF
-
           python3 - <<'PY'
           from pathlib import Path
           p = Path("src/main.tsx")
@@ -66,8 +57,8 @@ jobs:
           marker = 'import "./quickserve-native-location";'
           if marker not in text:
               p.write_text(marker + "\n" + text)
-          print("Native Geolocation bridge: OK")
           PY
+          echo "Native Geolocation bridge: OK"
 
       - name: Build React app
         run: npm run build
@@ -79,34 +70,80 @@ jobs:
           from pathlib import Path
           import re
 
-          target = re.compile(
-              r'N=\(\)=>\{s\(\{city:"Bengaluru",area:"Indiranagar"\}\),e\(!1\),l\("GPS Location locked: Indiranagar, Bengaluru"\)\}'
-          )
-
-          replacement = '''N=()=>{(async()=>{try{const G=window.__QuickServeNativeGeolocation;if(!G){l("Native GPS is not available in this APK");return}l("Requesting GPS location permission...");const P=await G.requestPermissions();if(P.location==="denied"){l("Location permission denied. Android Settings > Apps > QuickServe > Permissions > Location > Allow");return}l("Getting your current GPS location...");const O=await G.getCurrentPosition({enableHighAccuracy:true,timeout:15000});const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);const W=await U.json();const A=W.city||W.locality||W.principalSubdivision||"Current Location";const V=W.locality||W.city||"GPS Location";s({city:A,area:V});e(!1);l(`GPS Location locked: ${V}, ${A}`)}catch(X){console.error("QuickServe native GPS error",X);const C=X&&X.code;if(C==="OS-PLUG-GLOC-0003")l("Location permission denied. Please allow location permission in Android Settings.");else if(C==="OS-PLUG-GLOC-0002")l("GPS location is unavailable. Please turn on Location/GPS.");else if(C==="OS-PLUG-GLOC-0004")l("GPS request timed out. Please try again outdoors or near a window.");else{l("Could not get GPS location. Please turn ON Location and try again.")}}})()}'''
+          replacement = '''N=()=>{(async()=>{try{const G=window.__QuickServeNativeGeolocation;if(!G){l("Native GPS is not available in this APK");return}l("Requesting GPS location permission...");const P=await G.requestPermissions();if(P.location==="denied"){l("Location permission denied. Android Settings > Apps > QuickServe > Permissions > Location > Allow");return}l("Getting your current GPS location...");const O=await G.getCurrentPosition({enableHighAccuracy:true,timeout:15000});const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);const W=await U.json();const A=W.city||W.locality||W.principalSubdivision||"Current Location";const V=W.locality||W.city||"GPS Location";s({city:A,area:V});e(!1);l(`GPS Location locked: ${V}, ${A}`)}catch(X){console.error("QuickServe native GPS error",X);const C=X&&X.code;if(C==="OS-PLUG-GLOC-0003")l("Location permission denied. Please allow location permission in Android Settings.");else if(C==="OS-PLUG-GLOC-0002")l("GPS location is unavailable. Please turn on Location/GPS.");else if(C==="OS-PLUG-GLOC-0004")l("GPS request timed out. Please try again outdoors or near a window.");else l("Could not get GPS location. Please turn ON Location and try again.")}})()}'''
 
           patched = 0
           for p in Path("dist").rglob("*.js"):
               text = p.read_text(errors="ignore")
-              new_text, count = target.subn(replacement, text, count=1)
-              if count:
-                  p.write_text(new_text)
-                  patched += count
-                  print(f"Patched native GPS handler: {p}")
+              marker = 'GPS Location locked: Indiranagar, Bengaluru'
+              pos = text.find(marker)
+              if pos < 0:
+                  continue
+
+              # Find the arrow-function start immediately before the marker.
+              start = text.rfind('N=()=>{', 0, pos)
+              if start < 0:
+                  # Fallback: locate any one-letter minified arrow function before the marker.
+                  m = list(re.finditer(r'[A-Za-z_$][\w$]*=\(\)=>\{', text[:pos]))
+                  if not m:
+                      continue
+                  start = m[-1].start()
+
+              # Count braces to locate the end of that function.
+              i = text.find('{', start)
+              depth = 0
+              end = None
+              in_str = None
+              esc = False
+              for j in range(i, len(text)):
+                  c = text[j]
+                  if in_str:
+                      if esc:
+                          esc = False
+                      elif c == '\\\\':
+                          esc = True
+                      elif c == in_str:
+                          in_str = None
+                      continue
+                  if c in "\\\"'`":
+                      in_str = c
+                  elif c == '{':
+                      depth += 1
+                  elif c == '}':
+                      depth -= 1
+                      if depth == 0:
+                          end = j + 1
+                          break
+              if end is None:
+                  raise SystemExit(f"ERROR: could not find end of location handler in {p}")
+
+              old = text[start:end]
+              # Preserve the actual minified function variable name and setter names
+              # if Vite changed them, while using the known current QuickServe structure.
+              head = re.match(r'([A-Za-z_$][\\w$]*)=\\(\\)=>\\{', old)
+              if not head:
+                  continue
+              fn = head.group(1)
+              # Existing handler in this app uses s/e/l for state/message setters.
+              new = replacement.replace('N=()=>{', f'{fn}=()=>{{')
+              text = text[:start] + new + text[end:]
+              p.write_text(text)
+              patched += 1
+              print(f"Patched native GPS handler: {p}")
+              break
 
           if patched != 1:
-              raise SystemExit(f"ERROR: expected exactly 1 location handler to patch, found {patched}")
+              raise SystemExit(f"ERROR: expected exactly 1 location handler, found {patched}")
 
-          found_bridge = False
+          found = False
           for p in Path("dist").rglob("*.js"):
               text = p.read_text(errors="ignore")
-              if "__QuickServeNativeGeolocation" in text and "requestPermissions" in text:
-                  found_bridge = True
-                  print(f"Verified native Geolocation bridge in {p}")
+              if "__QuickServeNativeGeolocation" in text and "requestPermissions" in text and "getCurrentPosition" in text:
+                  found = True
+                  print(f"Verified native GPS code in {p}")
                   break
-          if not found_bridge:
-              raise SystemExit("ERROR: native Geolocation bridge was not bundled")
-
+          if not found:
+              raise SystemExit("ERROR: native GPS code was not bundled")
           print("Native GPS location patch: OK")
           PY
 
@@ -116,14 +153,9 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
           import re
-
           patched = 0
-          pattern = re.compile(
-              r'J3=\(\{children:r\}\)=>\{const\{isDeviceFrame:e,setIsDeviceFrame:t\}=es\(\),.*?\},K3=\(\)=>',
-              re.S,
-          )
+          pattern = re.compile(r'J3=\(\{children:r\}\)=>\{const\{isDeviceFrame:e,setIsDeviceFrame:t\}=es\(\),.*?\},K3=\(\)=>', re.S)
           replacement = 'J3=({children:r})=>f.jsx("div",{className:"min-h-screen w-full bg-white text-neutral-900 overflow-hidden",children:r}),K3=()=>'
-
           for p in Path("dist").rglob("*.js"):
               text = p.read_text(errors="ignore")
               new_text, count = pattern.subn(replacement, text, count=1)
@@ -131,15 +163,12 @@ jobs:
                   p.write_text(new_text)
                   patched += count
                   print(f"Patched mobile wrapper: {p}")
-
           if patched != 1:
-              raise SystemExit(f"ERROR: expected to patch exactly 1 mobile wrapper, patched {patched}")
-
+              raise SystemExit(f"ERROR: expected exactly 1 mobile wrapper, patched {patched}")
           for p in Path("dist").rglob("*.js"):
               text = p.read_text(errors="ignore")
               if 'children:"5G"' in text or 'children:"88%"' in text or 'toggle-view-mode-btn' in text:
                   raise SystemExit(f"ERROR: fake device UI still present in {p}")
-
           print("Mobile UI patch: OK")
           PY
 
@@ -179,7 +208,7 @@ jobs:
           from pathlib import Path
           p = Path("android/build.gradle")
           text = p.read_text()
-          fix = '''\n\n// Keep Kotlin stdlib dependencies compatible with the generated Capacitor project.\nsubprojects {\n    configurations.configureEach {\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'\n    }\n}\n'''
+          fix = '''\n\nsubprojects {\n    configurations.configureEach {\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk7'\n        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib-jdk8'\n    }\n}\n'''
           if "kotlin-stdlib-jdk7" not in text or "exclude group: 'org.jetbrains.kotlin'" not in text:
               p.write_text(text + fix)
           PY
