@@ -45,10 +45,34 @@ jobs:
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
+      - name: Install native Geolocation plugin
+        run: npm install @capacitor/geolocation --no-audit --no-fund
+
+      - name: Inject native Geolocation bridge
+        shell: bash
+        run: |
+          cat > src/quickserve-native-location.ts <<'EOF'
+          import { Geolocation } from '@capacitor/geolocation';
+
+          // Expose the native Capacitor Geolocation plugin to the existing QuickServe UI.
+          // The APK uses Android's real location permission/GPS APIs.
+          (window as any).__QuickServeNativeGeolocation = Geolocation;
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src/main.tsx")
+          text = p.read_text()
+          marker = 'import "./quickserve-native-location";'
+          if marker not in text:
+              p.write_text(marker + "\n" + text)
+          print("Native Geolocation bridge: OK")
+          PY
+
       - name: Build React app
         run: npm run build
 
-      - name: Fix real GPS location in mobile build
+      - name: Replace location handler with native GPS
         shell: bash
         run: |
           python3 - <<'PY'
@@ -59,29 +83,7 @@ jobs:
               r'N=\(\)=>\{s\(\{city:"Bengaluru",area:"Indiranagar"\}\),e\(!1\),l\("GPS Location locked: Indiranagar, Bengaluru"\)\}'
           )
 
-          replacement = '''N=()=>{\
-          if(!navigator.geolocation){l("Location is not supported on this device");return}\
-          l("Getting your current GPS location...");\
-          navigator.geolocation.getCurrentPosition(async O=>{\
-          try{\
-          const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);\
-          const W=await U.json();\
-          const A=W.city||W.locality||W.principalSubdivision||"Current Location";\
-          const V=W.locality||W.city||"GPS Location";\
-          s({city:A,area:V});\
-          e(!1);\
-          l(`GPS Location locked: ${V}, ${A}`);\
-          }catch{\
-          s({city:"Current Location",area:"GPS Location"});\
-          e(!1);\
-          l("GPS location found, but address lookup failed");\
-          }\
-          },O=>{\
-          if(O.code===1)l("Location permission denied. Please allow location permission in Android settings.");\
-          else if(O.code===2)l("GPS location unavailable. Please turn on Location/GPS.");\
-          else if(O.code===3)l("GPS request timed out. Please try again.");\
-          else l("Unable to get your current location. Please try again.");\
-          },{enableHighAccuracy:true,timeout:15000,maximumAge:30000})}'''
+          replacement = '''N=()=>{(async()=>{try{const G=window.__QuickServeNativeGeolocation;if(!G){l("Native GPS is not available in this APK");return}l("Requesting GPS location permission...");const P=await G.requestPermissions();if(P.location==="denied"){l("Location permission denied. Android Settings > Apps > QuickServe > Permissions > Location > Allow");return}l("Getting your current GPS location...");const O=await G.getCurrentPosition({enableHighAccuracy:true,timeout:15000});const U=await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${O.coords.latitude}&longitude=${O.coords.longitude}&localityLanguage=en`);const W=await U.json();const A=W.city||W.locality||W.principalSubdivision||"Current Location";const V=W.locality||W.city||"GPS Location";s({city:A,area:V});e(!1);l(`GPS Location locked: ${V}, ${A}`)}catch(X){console.error("QuickServe native GPS error",X);const C=X&&X.code;if(C==="OS-PLUG-GLOC-0003")l("Location permission denied. Please allow location permission in Android Settings.");else if(C==="OS-PLUG-GLOC-0002")l("GPS location is unavailable. Please turn on Location/GPS.");else if(C==="OS-PLUG-GLOC-0004")l("GPS request timed out. Please try again outdoors or near a window.");else{l("Could not get GPS location. Please turn ON Location and try again.")}}})()}'''
 
           patched = 0
           for p in Path("dist").rglob("*.js"):
@@ -90,11 +92,22 @@ jobs:
               if count:
                   p.write_text(new_text)
                   patched += count
-                  print(f"Patched GPS location: {p}")
+                  print(f"Patched native GPS handler: {p}")
 
           if patched != 1:
-              raise SystemExit(f"ERROR: expected exactly 1 GPS handler to patch, found {patched}")
-          print("Real GPS location patch: OK")
+              raise SystemExit(f"ERROR: expected exactly 1 location handler to patch, found {patched}")
+
+          found_bridge = False
+          for p in Path("dist").rglob("*.js"):
+              text = p.read_text(errors="ignore")
+              if "__QuickServeNativeGeolocation" in text and "requestPermissions" in text:
+                  found_bridge = True
+                  print(f"Verified native Geolocation bridge in {p}")
+                  break
+          if not found_bridge:
+              raise SystemExit("ERROR: native Geolocation bridge was not bundled")
+
+          print("Native GPS location patch: OK")
           PY
 
       - name: Remove desktop/device preview wrapper from mobile build
@@ -151,7 +164,6 @@ jobs:
           text = p.read_text()
           permissions = '''    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n'''
           if "android.permission.ACCESS_FINE_LOCATION" not in text:
-              text = text.replace("<manifest ", "<manifest ", 1)
               pos = text.find(">", text.find("<manifest")) + 1
               text = text[:pos] + "\n" + permissions + text[pos:]
               p.write_text(text)
